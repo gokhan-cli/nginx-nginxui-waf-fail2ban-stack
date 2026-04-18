@@ -3,8 +3,7 @@
 # OpenAppSec merkezi bulut (SaaS) yerine tamamen **yerel (local)** olarak yönetilecek ve çalışacaktır. 
 # Bu nedenle kurulum, offline entegrasyonu sağlamak adına "download mod" ile ilerleyecektir:
 
-wget https://downloads.openappsec.io/openappsec-install
-chmod +x openappsec-install
+wget https://downloads.openappsec.io/open-appsec-install && chmod +x open-appsec-install 
 
 # OpenAppSec'i yerel yönetim için download modunda çalıştıran komut:
 sudo ./openappsec-install --auto # Download modda kurulum aşamasında hata almamak için kurulumu önce bu modda çalıştırın.

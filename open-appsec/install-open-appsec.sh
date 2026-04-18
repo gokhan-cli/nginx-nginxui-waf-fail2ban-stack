@@ -6,8 +6,8 @@
 wget https://downloads.openappsec.io/open-appsec-install && chmod +x open-appsec-install 
 
 # OpenAppSec'i yerel yönetim için download modunda çalıştıran komut:
-sudo ./openappsec-install --auto # Download modda kurulum aşamasında hata almamak için kurulumu önce bu modda çalıştırın.
-sudo ./openappsec-install --download # OpenAppSec yerelde çalışağı için biz bu modu kullanacağız.
+sudo ./open-appsec-install --auto # Download modda kurulum aşamasında hata almamak için kurulumu önce bu modda çalıştırın.
+sudo ./open-appsec-install --download # OpenAppSec yerelde çalışağı için biz bu modu kullanacağız.
 
 # (İndirilen paketi sisteminize göre genişleterek kurulum dosyasından
 # yerel yönetim (Local Management / Declarative) seçeneğiyle entegrasyonu tamamlayın.)

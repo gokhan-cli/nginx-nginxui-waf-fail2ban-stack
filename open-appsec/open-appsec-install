@@ -1,0 +1,638 @@
+#!/bin/bash
+
+NGINX_VERSION_CONF_OUTPUT_PATH=/tmp/nginx.sourcefile.conf
+INSTALL_CENTRAL_NGINX_MANAGER=false
+OPEN_APPSEC_DOWNLOAD_PATH=/tmp/open-appsec
+INSTALL_COMMAND='--install'
+UNINSTALL_COMMAND='--uninstall'
+HYBRID_MODE_COMMAND="--hybrid_mode"
+TOKEN_COMMAND="--token"
+FOG_COMMAND="--fog"
+EMAIL_COMMAND="--email"
+EMAIL_ADDRESS=""
+NO_EMAIL=false
+KONG_PLUGIN=false
+AUTO_INSTALL=
+PREVET_MODE=false
+CUSTOM_PATH=false
+CURL_FAILIURE=false
+AGENT_OPTIONS=
+ARCHITECTURE=
+RELEASE_NAME=
+RELEASE_VERSION_CODENAME=
+NGINX_VERSION=
+NGX_FULL_VERSION=
+ATTACHMENT_TYPE="nginx"
+DOWNLOAD_ATTACHMENT_EXTENSION="tar.gz"
+LIB_MODULE_PATH=$(nginx -V 2>&1 | tr ' ' '\n' | grep modules-path | cut -d '=' -f2 | grep -o '.*lib[^@/]*')
+EMAIL_REGEX="^[a-z0-9!#\$%&'*+/=?^_\`{|}~-]+(\.[a-z0-9!#$%&'*+/=?^_\`{|}~-]+)*@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?\$"
+
+if [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ] || [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+        LIB_MODULE_PATH="/usr/lib"
+        mkdir -p /usr/lib/nginx/modules/
+        if command -v kong; then
+            ATTACHMENT_TYPE="kong"
+            DOWNLOAD_ATTACHMENT_EXTENSION="sh"
+        else
+            ATTACHMENT_TYPE="apisix"
+        fi
+fi
+if [ ! -d $LIB_MODULE_PATH ]; then
+        LIB_MODULE_PATH=/usr/lib
+fi
+
+get_nginx_full_version()
+{
+    if command -v /usr/bin/apt
+    then
+        /usr/bin/apt-get update
+        /usr/bin/apt-get install lsb-release -y
+        /usr/bin/apt install curl gnupg2 ca-certificates lsb-release -y
+        curl -fsSL https://nginx.org/keys/nginx_signing.key | /usr/bin/apt-key add -
+        /usr/bin/apt-key fingerprint ABF5BD827BD9BF62
+        /usr/bin/apt update
+        NGINX_VERSION=$(/usr/bin/apt list -a nginx | grep "nginx" | grep "now" | cut -d' ' -f2 | tr '~' -)
+        NGX_FULL_VERSION=ngx_module_$(/usr/bin/apt list -a nginx | grep "nginx" | grep "now" | cut -d' ' -f2 | tr '~' -)
+        if [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+            NGINX_VERSION=$(echo "$(kong version)" | sed 's/[^0-9\.]*//g')
+            NGX_FULL_VERSION="install-cp-attachment-kong-${NGINX_VERSION}"
+        elif [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+            NGINX_VERSION=$(/usr/local/openresty/nginx/sbin/nginx -v |& cut -d/ -f2)
+            NGX_FULL_VERSION="openresty_"${NGINX_VERSION}
+            NGINX_VERSION=$(apisix version | grep -oP '\d+\.\d+\.\d+')
+        fi
+    elif command -v yum
+    then
+        NGINX_VERSION=$(yum list installed nginx | grep nginx\. | tr -s ' ' | cut -d' ' -f2 | cut -d':' -f2)
+        NGX_FULL_VERSION=ngx_module_$(yum list installed nginx | grep nginx\. | tr -s ' ' | cut -d' ' -f2 | cut -d':' -f2)
+    elif command -v apk
+    then
+        exit 1
+    fi
+}
+
+url_encode() {
+    echo "$1" \
+    | sed \
+        -e 's/%/%25/g' \
+        -e 's/ /%20/g' \
+        -e 's/!/%21/g' \
+        -e 's/"/%22/g' \
+        -e "s/'/%27/g" \
+        -e 's/#/%23/g' \
+        -e 's/(/%28/g' \
+        -e 's/)/%29/g' \
+        -e 's/+/%2b/g' \
+        -e 's/,/%2c/g' \
+        -e 's/-/%2d/g' \
+        -e 's/:/%3a/g' \
+        -e 's/;/%3b/g' \
+        -e 's/?/%3f/g' \
+        -e 's/@/%40/g' \
+        -e 's/\$/%24/g' \
+        -e 's/\&/%26/g' \
+        -e 's/\*/%2a/g' \
+        -e 's/\./%2e/g' \
+        -e 's/\//%2f/g' \
+        -e 's/\[/%5b/g' \
+        -e 's/\\/%5c/g' \
+        -e 's/\]/%5d/g' \
+        -e 's/\^/%5e/g' \
+        -e 's/_/%5f/g' \
+        -e 's/`/%60/g' \
+        -e 's/{/%7b/g' \
+        -e 's/|/%7c/g' \
+        -e 's/}/%7d/g' \
+        -e 's/~/%7e/g'
+}
+
+usage()
+{
+    echo "Usage:"
+    echo "    --auto            : Install open-appsec and add an attachment (plugin) to your NGINX"
+    echo "    --download        : Download software components and provide instructions for manual installation"
+    echo "    --uninstall       : Uninstall open-appsec and remove the attachment (plugin) to your NGINX"
+    echo "Optional:"
+    echo "    --tmpdir <path>   : Path for download software components (default '/tmp/open-appsec/')"
+    echo "    --prevent         : On automatic installation mode, set the default rule to prevent"
+    echo "    --email <address> : Provide an email address for support purposes"
+    echo "    --no-email        : Skip asking for email address for support purposes"
+    echo "    --kong-plugin     : the attachment is a KONG plugin, not NGINX module, you must have KONG installed"
+    echo "    --central-nginx-manager : Install central nginx manager component"
+    echo ""
+    echo "For more details refer to docs.openappsec.io"
+    exit 1
+}
+
+uninstall()
+{
+    echo "Are you sure you want to uninstall open-appsec for NGINX? (Y/N): " && read -r ua_confirm
+    case $ua_confirm in
+    [Yy] | [Yy][Ee][Ss]) ;;
+    *) exit 1 ;;
+    esac
+    chmod +x ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh
+    ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh ${UNINSTALL_COMMAND} &> /dev/null
+    if [ $? -ne 0 ]; then
+        echo "Failed to uninstall open-appsec for NGINX"
+        exit 1
+    fi
+
+    [ -f "${LIB_MODULE_PATH}/libosrc_shmem_ipc.so" ] && rm -f "${LIB_MODULE_PATH}/libosrc_shmem_ipc.so"
+    [ -f "${LIB_MODULE_PATH}/libosrc_compression_utils.so" ] && rm -f "${LIB_MODULE_PATH}/libosrc_compression_utils.so"
+    [ -f "${LIB_MODULE_PATH}/libosrc_nginx_attachment_util.so" ] && rm -f "${LIB_MODULE_PATH}/libosrc_nginx_attachment_util.so"
+    [ -f "${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so" ] && rm -f "${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so"
+
+    if [ -f /etc/nginx/nginx.conf ]; then
+            if [ -n "$(cat /etc/nginx/nginx.conf | grep load_module.*ngx_cp_attachment_module.so)" ]; then
+                if [ ${LIB_MODULE_PATH} = "/usr/lib" ]; then
+                        sed -i '/load_module \/usr\/lib\/nginx\/modules\/ngx_cp_attachment_module.so;/d' /etc/nginx/nginx.conf
+                elif [ ${LIB_MODULE_PATH} = "/usr/lib64" ]; then
+                        sed -i '/load_module \/usr\/lib64\/nginx\/modules\/ngx_cp_attachment_module.so;/d' /etc/nginx/nginx.conf
+                fi
+            fi
+            service nginx restart
+    fi
+    NGINX_TEMPLATE="/usr/local/share/lua/5.1/kong/templates/nginx.lua"
+    if [ -f "$NGINX_TEMPLATE" ]; then
+        grep -q "ngx_cp_attachment_module.so" "$NGINX_TEMPLATE" && \
+            sed -i -e '/ngx_cp_attachment_module.so;/d' -e '/cp_worker_processes/d' "$NGINX_TEMPLATE"
+
+        kong restart |& grep -v "\[warn\] ulimit is currently"
+    fi
+    if [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+            sed -i -e '/load_module.*ngx_cp_attachment_module.so;/d' -e '/cp_worker_processes/d' /usr/local/apisix/apisix/cli/ngx_tpl.lua
+            apisix reload
+    fi
+
+    rm -rf ${OPEN_APPSEC_DOWNLOAD_PATH}
+    echo "open-appsec for NGINX successfully uninstalled"
+    exit 0
+}
+
+download_attachment_files_from_cloud()
+{
+    echo "Searching local NGINX…"
+    get_nginx_full_version &> /dev/null
+
+    if [[ -z "$NGINX_VERSION" ]]; then
+        echo "NGINX is not installed"
+        exit 1
+    fi
+
+    echo "${ATTACHMENT_TYPE} version found: ${NGINX_VERSION}"
+
+    if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+        echo "SELinux has been detected, which could potentially disrupt the agent's normal operation."
+        echo "For trouble shooting instructions check: https://docs.openappsec.io/troubleshooting/troubleshooting-guides/selinux-checking-status-and-disabling"
+    fi
+
+    if [ $CUSTOM_PATH = true ]; then
+        if [ ! -d ${OPEN_APPSEC_DOWNLOAD_PATH} ]; then
+            mkdir ${OPEN_APPSEC_DOWNLOAD_PATH}
+        elif [ -n "$(ls -A ${OPEN_APPSEC_DOWNLOAD_PATH})" ]; then
+            echo "!! Destination path '${OPEN_APPSEC_DOWNLOAD_PATH}' already exists and is not an empty directory."
+            exit 1
+        fi
+    else
+        rm -rf ${OPEN_APPSEC_DOWNLOAD_PATH}
+    fi
+
+    if [ ! -d ${OPEN_APPSEC_DOWNLOAD_PATH} ]; then
+        mkdir ${OPEN_APPSEC_DOWNLOAD_PATH}
+    fi
+
+    if [ "$ATTACHMENT_TYPE" == "apisix" ]; then
+        supported_nginx=$(curl -s https://downloads.openappsec.io/packages/supported-${ATTACHMENT_TYPE}.txt | grep ${NGX_FULL_VERSION})
+    else
+        supported_nginx=$(curl -s https://downloads.openappsec.io/packages/supported-${ATTACHMENT_TYPE}.txt | grep ${NGINX_VERSION})
+    fi
+    if [ -z "$supported_nginx" ]; then
+        echo "Unsupported ${ATTACHMENT_TYPE} version: ${NGINX_VERSION}. Please see docs.openappsec.io"
+        exit 1
+    fi
+
+    echo "Downloading open-appsec NGINX attachment... stored in '${OPEN_APPSEC_DOWNLOAD_PATH}'"
+    if [ "$ATTACHMENT_TYPE" == "apisix" ]; then
+        ATTACHMENT_TYPE="kong"
+    fi
+    encoded_ngx_version=$(url_encode "${NGX_FULL_VERSION}")
+    nginx_curl=$(curl -s -w "%{http_code}" \
+        https://downloads.openappsec.io/packages/${ATTACHMENT_TYPE}-attachment/${ARCHITECTURE}/${RELEASE_NAME}/${RELEASE_VERSION_CODENAME}/${encoded_ngx_version}.${DOWNLOAD_ATTACHMENT_EXTENSION}  \
+        --output ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}.${DOWNLOAD_ATTACHMENT_EXTENSION})
+    if [ "$nginx_curl" != 200 ]; then
+        if [[ ${RELEASE_VERSION_CODENAME} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            RELEASE_VERSION_CODENAME=$(echo ${RELEASE_VERSION_CODENAME} | cut -d"." -f1)
+        fi
+        nginx_curl=$(curl -s -w "%{http_code}" \
+            https://downloads.openappsec.io/packages/${ATTACHMENT_TYPE}-attachment/${ARCHITECTURE}/${RELEASE_NAME}/${RELEASE_VERSION_CODENAME}/${encoded_ngx_version}.${DOWNLOAD_ATTACHMENT_EXTENSION}  \
+            --output ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}.${DOWNLOAD_ATTACHMENT_EXTENSION})
+    fi
+    if [ "$nginx_curl" != 200 ]; then
+            echo "Failed to download nginx-attachment for ${ATTACHMENT_TYPE} version: ${NGINX_VERSION}"
+            CURL_FAILIURE=true
+    fi
+
+
+    if [ "$DOWNLOAD_ATTACHMENT_EXTENSION" != "sh" ]; then
+        tar -xzf ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}.tar.gz -C ${OPEN_APPSEC_DOWNLOAD_PATH}
+        mv ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libngx_module.so ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/ngx_cp_attachment_module.so
+    fi
+}
+
+download_agent_files_from_cloud()
+{
+    supported_os_details=$(curl -s -o /dev/null -w "%{http_code}" \
+        https://downloads.openappsec.io/packages/agent/${ARCHITECTURE}/${RELEASE_NAME}/${RELEASE_VERSION_CODENAME}/ 2>/dev/null)
+    if [ "$supported_os_details" != 200 ]; then
+        echo "The combination of ${RELEASE_NAME} ${RELEASE_VERSION_CODENAME} on ${ARCHITECTURE} is unsupported. Please see docs.openappsec.io"
+        exit 1
+    fi
+
+    if [[ -z "${KILLERCODA_PLAYGROUND}" ]]; then
+        PACKAGES_FOLDER="packages"
+    else
+        PACKAGES_FOLDER="playground"
+    fi
+
+    if [ "$KONG_PLUGIN" = true ]; then
+        if [ $CUSTOM_PATH = true ]; then
+            if [ ! -d ${OPEN_APPSEC_DOWNLOAD_PATH} ]; then
+                mkdir ${OPEN_APPSEC_DOWNLOAD_PATH}
+            elif [ -n "$(ls -A ${OPEN_APPSEC_DOWNLOAD_PATH})" ]; then
+                echo "!! Destination path '${OPEN_APPSEC_DOWNLOAD_PATH}' already exists and is not an empty directory."
+                exit 1
+            fi
+        else
+            rm -rf ${OPEN_APPSEC_DOWNLOAD_PATH}
+        fi
+
+        if [ ! -d ${OPEN_APPSEC_DOWNLOAD_PATH} ]; then
+            mkdir ${OPEN_APPSEC_DOWNLOAD_PATH}
+        fi
+    fi
+
+    echo "Downloading open-appsec agent... stored in '${OPEN_APPSEC_DOWNLOAD_PATH}'"
+    agent_packages_curl=$(curl -s -w "%{http_code}" \
+            https://downloads.openappsec.io/${PACKAGES_FOLDER}/agent/${ARCHITECTURE}/${RELEASE_NAME}/${RELEASE_VERSION_CODENAME}/openappsec-${RELEASE_VERSION_CODENAME}.tar.gz \
+            --output ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec.tar.gz)
+    if [ "$agent_packages_curl" != 200 ]; then
+            if [[ ${RELEASE_VERSION_CODENAME} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                RELEASE_VERSION_CODENAME=$(echo ${RELEASE_VERSION_CODENAME} | cut -d"." -f1)
+            fi
+            agent_packages_curl=$(curl -s -w "%{http_code}" \
+                    https://downloads.openappsec.io/${PACKAGES_FOLDER}/agent/${ARCHITECTURE}/${RELEASE_NAME}/${RELEASE_VERSION_CODENAME}/openappsec-${RELEASE_VERSION_CODENAME}.tar.gz \
+                    --output ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec.tar.gz)
+    fi
+    if [ "$agent_packages_curl" != 200 ]; then
+            echo "Failed to download open-appsec agent"
+            CURL_FAILIURE=true
+    fi
+
+    if [ $CURL_FAILIURE = true ]; then
+        exit 1
+    fi
+
+    tar -xzf ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec.tar.gz -C ${OPEN_APPSEC_DOWNLOAD_PATH}
+}
+
+auto_install()
+{
+    if [ $NO_EMAIL = true ]; then
+        EMAIL_ADDRESS="IGNORE"
+    fi
+
+    while ! [[ "${EMAIL_ADDRESS}" =~ $EMAIL_REGEX ]] && ! [[ $EMAIL_ADDRESS = "IGNORE" ]]; do
+        echo "Add your email to receive important security updates and so you can approach us with technical questions (enter IGNORE to ignore):"
+        read -r EMAIL_ADDRESS
+    done
+    
+    if [ "$KONG_PLUGIN" = false ]; then
+        if [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+            echo "Installating open-appsec for KONG..."
+            bash ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}.sh --install
+            if [ $? -ne 0 ]; then
+                echo "Failed to load KONG configuration. Please fix KONG configuration and restart KONG service."
+                exit 1
+            fi
+        else
+            echo "Installing open-appsec for NGINX..."
+
+            if [ ! -d ${LIB_MODULE_PATH} ]; then
+                mkdir ${LIB_MODULE_PATH}
+            fi
+            cp -f ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_shmem_ipc.so ${LIB_MODULE_PATH}/libosrc_shmem_ipc.so
+            cp -f ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_compression_utils.so ${LIB_MODULE_PATH}/libosrc_compression_utils.so
+            cp -f ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_nginx_attachment_util.so ${LIB_MODULE_PATH}/libosrc_nginx_attachment_util.so
+
+            echo "Updating NGINX server configuration..."
+            if [ ! -d ${LIB_MODULE_PATH}/nginx/modules ]; then
+                mkdir -p ${LIB_MODULE_PATH}/nginx/modules
+            fi
+            cp ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/ngx_cp_attachment_module.so ${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so
+
+            if [ -f /etc/nginx/nginx.conf ]; then
+                if [ -z "$(cat /etc/nginx/nginx.conf | grep load_module.*ngx_cp_attachment_module.so)" ]; then
+                        if [ ${LIB_MODULE_PATH} = "/usr/lib" ]; then
+                                sed -i '1s/^/load_module \/usr\/lib\/nginx\/modules\/ngx_cp_attachment_module.so;\n/' /etc/nginx/nginx.conf
+                        elif [ ${LIB_MODULE_PATH} = "/usr/lib64" ]; then
+                                sed -i '1s/^/load_module \/usr\/lib64\/nginx\/modules\/ngx_cp_attachment_module.so;\n/' /etc/nginx/nginx.conf
+                        fi
+                fi
+                service nginx restart
+            elif [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+                if [ -z "$(cat /usr/local/kong/nginx.conf  | grep load_module.*ngx_cp_attachment_module.so)" ]; then
+                        sed -i -e "s|return \[\[|return \[\[\nload_module /usr/lib/nginx/modules/ngx_cp_attachment_module.so;|g" -e "s|http {|http {\ncp_worker_processes \$\{\{nginx_worker_processes\}\};|g" /usr/local/share/lua/5.1/kong/templates/nginx.lua
+                fi
+                kong restart |& grep -v "\[warn\] ulimit is currently"
+            elif [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+                if [ -z "$(cat /usr/local/apisix/conf/nginx.conf  | grep load_module.*ngx_cp_attachment_module.so)" ]; then
+                        sed -i -e 's|return \[\=\[|return \[\=\[\nload_module /usr/lib/nginx/modules/ngx_cp_attachment_module.so;|' -e 's|http {|http {\ncp_worker_processes 2;|g' /usr/local/apisix/apisix/cli/ngx_tpl.lua
+                fi
+                apisix reload
+            fi
+
+            if [ $? -ne 0 ]; then
+                echo "Failed to load NGINX configuration. Please fix NGINX configuration and restart NGINX service."
+                exit 1
+            fi
+        fi
+    fi
+
+    echo "Starting open-appsec installation..."
+
+    chmod +x ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-*
+
+    if [ ! $EMAIL_ADDRESS = "IGNORE" ]; then
+        AGENT_OPTIONS="${AGENT_OPTIONS} ${EMAIL_COMMAND} ${EMAIL_ADDRESS}"
+    fi
+
+    if [ -f /etc/nginx/nginx.conf ]; then
+        ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh ${INSTALL_COMMAND} ${AGENT_OPTIONS} --server 'NGINX Server' &> /dev/null
+    elif [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+        if [ "$KONG_PLUGIN" = true ]; then
+            kong_server="Kong plugin"
+        else
+            kong_server="Kong server"
+        fi
+        ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh ${INSTALL_COMMAND} ${AGENT_OPTIONS} --server "${kong_server}" &> /dev/null
+    elif [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+        ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh ${INSTALL_COMMAND} ${AGENT_OPTIONS} --server 'APISIX Server' &> /dev/null
+    fi
+    ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-service-http-transaction-handler.sh ${INSTALL_COMMAND} &> /dev/null
+    ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-attachment-registration-manager.sh ${INSTALL_COMMAND} &> /dev/null
+    if [ $INSTALL_CENTRAL_NGINX_MANAGER = true ]; then
+    ${OPEN_APPSEC_DOWNLOAD_PATH}/install-cp-nano-central-nginx-manager.sh ${INSTALL_COMMAND} &> /dev/null
+    fi
+
+    if [ "$KONG_PLUGIN" = true ]; then
+        kong restart |& grep -v "\[warn\] ulimit is currently"
+    fi
+    if [ "$PROMETHEUS" = "true" ]; then
+        ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-service-prometheus.sh ${INSTALL_COMMAND} &> /dev/null
+    fi
+
+    if [ $PREVET_MODE = true ]; then
+            echo "Setting mode to prevent-learn..."
+        sed -i "s|detect-learn|prevent-learn|g" /etc/cp/conf/local_policy.yaml
+    fi
+    echo "Successfully installed open-appsec..."
+}
+
+manual_install_attachment()
+{
+    echo "Step 1: Deploying the NGINX attachment on an existing NGINX / Kong / APISIX server"
+    if [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+        echo "          
+        - Run the following commands:"
+        echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}.sh --install"
+    else
+        echo "- Copy the associated libraries:
+            cp ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_shmem_ipc.so ${LIB_MODULE_PATH}/libosrc_shmem_ipc.so
+            cp ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_compression_utils.so ${LIB_MODULE_PATH}/libosrc_compression_utils.so
+            cp ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/libosrc_nginx_attachment_util.so ${LIB_MODULE_PATH}/libosrc_nginx_attachment_util.so
+
+            - Copy the nginx attachment file:
+            cp ${OPEN_APPSEC_DOWNLOAD_PATH}/${NGX_FULL_VERSION}/ngx_cp_attachment_module.so ${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so"
+        if [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+            echo "
+            - Load the attachment in your apisix configuration by adding the following commands to the /usr/local/apisix/apisix/cli/ngx_tpl.lua:
+            - Under the 'return' section add the following line:
+                load_module ${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so;
+            - Under the second 'http' section add the following line:
+                cp_worker_processes 2;"
+        else
+            echo "
+            - Load the attachment on your nginx by adding the following command to you nginx.conf:
+            load_module ${LIB_MODULE_PATH}/nginx/modules/ngx_cp_attachment_module.so;"
+        fi
+    fi
+}
+
+check_root_permissions() 
+{
+    if [ "$EUID" -ne 0 ]; then
+        echo "Insufficient permissions: please run this script as root."
+        exit 1
+    fi
+}
+
+print_kong_instruction() 
+{
+    echo ""
+    echo "To allow open-appsec to inspect traffic passing through Kong, make sure to also install and activate the open-appsec-waf-kong-plugin."
+    echo ""
+    echo " 1) Install the plugin using LuaRocks:"
+    echo "    luarocks install https://raw.githubusercontent.com/openappsec/attachment/main/attachments/kong/open-appsec-waf-kong-plugin-1.0.0-1.rockspec --deps-mode=all"
+    echo ""
+    echo " 2) After installation, make sure to enable the plugin by choosing one of the following:"
+    echo "    -- Setting the environment variable:"
+    echo "       export KONG_PLUGINS=\"bundled,open-appsec-waf-kong-plugin\""
+    echo ""
+    echo "    -- Editing the Kong config file (kong.conf):"
+    echo "       plugins = bundled,open-appsec-waf-kong-plugin"
+    echo ""
+    echo " 3) Then restart Kong:"
+    echo "      kong restart"
+    echo ""
+    echo " 4) Finally, you can enable the plugin globally using:"
+    echo "    For Kong deployment using database:"
+    echo "      curl -i -X POST http://localhost:8001/plugins --data \"name=open-appsec-waf-kong-plugin\""
+    echo ""
+    echo "    For Kong deployment in DB-less mode add the following to your kong.yml file:"
+    echo "      plugins:"
+    echo "      - name: open-appsec-waf-kong-plugin"
+    echo "        config: {}"
+    echo ""
+    echo "    For Kong Konnect, upload the schema for open-appsec-waf-kong-plugin to your Konnect account and enable the plugin."
+    echo "      Schema: https://raw.githubusercontent.com/openappsec/attachment/main/attachments/kong/schema.lua"
+    echo ""
+    echo "For more options check https://developer.konghq.com/custom-plugins/"
+    echo ""
+}
+
+echo "open-appsec for NGINX, Kong and APISIX Installer v1.2245.1"
+echo "For release notes and known limitations check:"
+echo "https://docs.openappsec.io/release-notes"
+
+if [ -z $1 ]; then
+    AUTO_INSTALL=true
+fi
+
+while true; do
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+        usage
+        exit 0
+    elif [ "$1" = "--auto" ] || [ "$1" = "-a" ]; then
+        AUTO_INSTALL=true
+        shift
+    elif [ "$1" = "--download" ]  || [ "$1" = "-d" ];then
+        AUTO_INSTALL=false
+        shift
+    elif [ "$1" = "--tmpdir" ]; then
+        shift
+        OPEN_APPSEC_DOWNLOAD_PATH="$1"
+        CUSTOM_PATH=true
+        shift
+    elif [ "$1" = "--token" ]; then
+        shift
+        TOKEN="$1"
+        shift
+    elif [ "$1" = "--kong-plugin" ]; then
+        KONG_PLUGIN=true
+        shift
+    elif [ "$1" = "--fog" ]; then
+        shift
+        FOG_ADDR="$1"
+        shift
+    elif [ "$1" = "--prevent" ] || [ "$1" = "-p" ]; then
+        if [ $AUTO_INSTALL = true ]; then
+                PREVET_MODE=true
+            else
+            echo "--prevet option available only in automatic installation mode (--auto)"
+            usage
+        fi
+        shift
+    elif [ "$1" = "--email" ]; then
+	shift
+	EMAIL_ADDRESS="$1"
+	shift
+    elif [ "$1" = "--no-email" ]; then
+	NO_EMAIL=true
+	shift
+    elif [ "$1" = "--central-nginx-manager" ]; then
+    INSTALL_CENTRAL_NGINX_MANAGER=true
+    shift
+    elif [ "$1" = "--uninstall" ] || [ "$1" = "-u" ]; then
+        uninstall
+    elif [ -z $1 ]; then
+        break
+    else
+        echo "Unsupported option: $1"
+        usage
+    fi
+done
+
+check_root_permissions
+
+if [ -z ${AUTO_INSTALL} ]; then
+    usage
+fi
+
+if [[ -z $TOKEN ]];
+then
+    AGENT_OPTIONS="${HYBRID_MODE_COMMAND}"
+else
+    AGENT_OPTIONS="${TOKEN_COMMAND} ${TOKEN}"
+fi
+
+if [ -n "$FOG_ADDR" ]; then
+    AGENT_OPTIONS="${AGENT_OPTIONS} ${FOG_COMMAND} ${FOG_ADDR}"
+fi
+
+ARCHITECTURE=$(arch)
+if [[ -f /etc/os-release ]]; then
+    RELEASE_NAME=$(cat /etc/os-release | grep -w ID | cut -d= -f2 | sed 's|"||g' | tr '[:upper:]' '[:lower:]')
+else
+    RELEASE_NAME=$(cat /etc/*release | grep -w ID | cut -d= -f2 | sed 's|"||g' | tr '[:upper:]' '[:lower:]')
+fi
+if [[ "${RELEASE_NAME}" = "ol" ]]; then
+    RELEASE_NAME="rhel"
+fi
+RELEASE_VERSION_CODENAME=$(cat /etc/*release | grep -w VERSION_CODENAME | cut -d= -f2 | sed 's|"||g' | tr '[:upper:]' '[:lower:]')
+if [[ -z "${RELEASE_VERSION_CODENAME}" ]]; then
+    RELEASE_VERSION_CODENAME=$(cat /etc/*release | grep -w VERSION_ID | cut -d= -f2 | sed 's|"||g' | tr '[:upper:]' '[:lower:]')
+fi
+
+if [[ "${RELEASE_NAME}" = "rhel" ]]; then
+    RELEASE_VERSION_CODENAME=$(echo ${RELEASE_VERSION_CODENAME} | cut -d"." -f1)
+fi
+
+if [ "$KONG_PLUGIN" = false ]; then 
+    download_attachment_files_from_cloud
+fi
+download_agent_files_from_cloud
+
+if [ $AUTO_INSTALL = true ]; then
+    auto_install
+else
+    step_count=1
+    echo ""
+    echo "Follow the next steps:"
+    echo ""
+    if [ "$KONG_PLUGIN" = false ]; then
+        manual_install_attachment
+        step_count=$((step_count + 1))
+    fi
+
+    echo ""
+    echo "Step ${step_count}: Installing open-appsec agent
+
+        - Run the following commands:"
+
+        if [ -f /etc/nginx/nginx.conf ]; then
+            echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh --install ${AGENT_OPTIONS} --server 'NGINX Server'"
+        elif [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+            echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh --install ${AGENT_OPTIONS} --server 'Kong Server'"
+        elif [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+            echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-agent.sh --install ${AGENT_OPTIONS} --server 'APISIX Server'"
+        fi
+        echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-service-http-transaction-handler.sh --install"
+        echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-attachment-registration-manager.sh --install"
+        if [ "$PROMETHEUS" = "true" ]; then
+            echo "          ${OPEN_APPSEC_DOWNLOAD_PATH}/openappsec/install-cp-nano-service-prometheus.sh --install"
+        fi
+
+    echo ""
+    step_count=$((step_count + 1))
+
+    if [ -f /usr/local/share/lua/5.1/kong/templates/nginx.lua ]; then
+        echo "Step ${step_count}: restart Kong
+
+        - Run the following command:
+          kong restart"
+    elif [ -f /usr/local/apisix/apisix/cli/apisix.lua ]; then
+        echo "Step ${step_count}: restart APISIX
+
+        - Run the following command:
+          apisix reload"
+    else
+        echo "Step ${step_count}: validate NGINX configuration
+
+        - Run the following commands:
+          nginx -t
+          service nginx restart"
+    fi
+    echo ""
+fi
+
+mkdir -p open-appsec-tools
+curl -s https://downloads.openappsec.io/scripts/open-appsec-cloud-mgmt \
+    --output ./open-appsec-tools/open-appsec && chmod +x open-appsec-tools/open-appsec
+
+if [ "$KONG_PLUGIN" = true ]; then
+    print_kong_instruction
+fi
+
+echo "For release notes and known limitations check: https://docs.openappsec.io/release-notes"
+echo "For troubleshooting and support: https://openappsec.io/support"

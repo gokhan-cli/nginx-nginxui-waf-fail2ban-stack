@@ -29,10 +29,10 @@ sudo systemctl restart nginx
 # Hata almadıysak işlem başarılı olmuş demektir.
 # Son olarak aşağıdakileri de çalıştırıyoruz.
 /tmp/open-appsec/openappsec/install-cp-nano-agent.sh --install --hybrid_mode --server 'NGINX Server'
-nano /etc/cp/conf/local_policy.yaml
-# Policy mode detect-learn yerine prevent-learn olacak.
-open-appsec-ctl -ap
 /tmp/open-appsec/openappsec/./install-cp-nano-agent-cache.sh --install
 /tmp/open-appsec/openappsec/install-cp-nano-service-http-transaction-handler.sh --install
 /tmp/open-appsec/openappsec/install-cp-nano-attachment-registration-manager.sh --install
 
+nano /etc/cp/conf/local_policy.yaml
+# Policy mode detect-learn yerine prevent-learn olacak.
+open-appsec-ctl -ap

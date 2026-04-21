@@ -1,4 +1,4 @@
-# CrowdSec & open-appsec Kurulum Rehberi (Ubuntu 24.04)
+# CrowdSec Kurulum Rehberi (Ubuntu 24.04)
 
 Bu rehber, projenin arka planında Ubuntu tarafında yapmanız gereken ayarlamaları açıklar. open-appsec'in gönderdiği JSON formatındaki logları CrowdSec'e okutacağız.
 
